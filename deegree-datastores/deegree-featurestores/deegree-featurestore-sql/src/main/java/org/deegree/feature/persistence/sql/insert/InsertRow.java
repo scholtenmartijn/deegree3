@@ -1,4 +1,4 @@
-//$HeadURL$
+
 /*----------------------------------------------------------------------------
  This file is part of deegree, http://deegree.org/
  Copyright (C) 2001-2011 by:
@@ -76,10 +76,13 @@ public abstract class InsertRow extends TransactionRow {
 
     // parent rows
     private final Map<InsertRow, ParentRowReference> parentToRef = new HashMap<InsertRow, ParentRowReference>();
+    
+    private final String layername;
 
-    protected InsertRow( InsertRowManager mgr ) {
+    protected InsertRow( InsertRowManager mgr, String layername ) {
         super( null );
         this.mgr = mgr;
+        this.layername = layername;
     }
 
     /**
@@ -228,6 +231,7 @@ public abstract class InsertRow extends TransactionRow {
                 stmt.setObject( columnId++, null );
             }
         }
+        System.out.println(stmt.toString());
         stmt.execute();
 
         if ( !autoGenColumns.isEmpty() ) {
@@ -250,6 +254,7 @@ public abstract class InsertRow extends TransactionRow {
                 }
             }
         }
+        
         stmt.close();
     }
 
@@ -265,7 +270,12 @@ public abstract class InsertRow extends TransactionRow {
 
     @Override
     public String getSql() {
-        StringBuilder sql = new StringBuilder( "INSERT INTO " + table + "(" );
+        StringBuilder sql = null;
+        if(layername.contentEquals("") || layername.isEmpty()) {
+        	sql = new StringBuilder( "INSERT INTO " + table + "(" );
+        }else {
+        	sql = new StringBuilder( "INSERT INTO " + layername + "(" );
+        }
         boolean first = true;
         for ( SQLIdentifier column : columnToLiteral.keySet() ) {
             if ( !first ) {

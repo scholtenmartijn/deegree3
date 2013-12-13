@@ -1,4 +1,3 @@
-//$HeadURL$
 /*----------------------------------------------------------------------------
  This file is part of deegree, http://deegree.org/
  Copyright (C) 2001-2011 by:
@@ -57,8 +56,8 @@ class JoinRow extends InsertRow {
      *            table join that leads to this join row, must not be <code>null</code>
      * @throws FeatureStoreException
      */
-    JoinRow( InsertRowManager mgr, TableJoin join ) throws FeatureStoreException {
-        super( mgr );
+    JoinRow( InsertRowManager mgr, TableJoin join, String tablename ) throws FeatureStoreException {
+        super( mgr, tablename );
         this.table = join.getToTable();
         generateImmediateKeys( join.getKeyColumnToGenerator() );
     }

@@ -1,4 +1,3 @@
-//$HeadURL$
 /*----------------------------------------------------------------------------
  This file is part of deegree, http://deegree.org/
  Copyright (C) 2001-2011 by:
@@ -73,6 +72,8 @@ public class FeatureRow extends InsertRow {
     private FIDMapping fidMapping;
 
     private String newId;
+    
+    private String layername;
 
     /**
      * Creates a new {@link FeatureRow} instance.
@@ -82,9 +83,10 @@ public class FeatureRow extends InsertRow {
      * @param origFid
      *            original feature id (before id generation), may be <code>null</code> (feature without id)
      */
-    public FeatureRow( InsertRowManager mgr, String origFid ) {
-        super( mgr );
+    public FeatureRow( InsertRowManager mgr, String origFid, String layername ) {
+        super( mgr, layername );
         this.origFid = origFid;
+        this.layername = layername;
     }
 
     /**

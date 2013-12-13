@@ -35,12 +35,15 @@
  ----------------------------------------------------------------------------*/
 package org.deegree.feature.persistence.sql.insert;
 
+import static org.deegree.feature.Features.findFeaturesAndGeometries;
+
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -51,20 +54,30 @@ import org.deegree.commons.jdbc.SQLIdentifier;
 import org.deegree.commons.jdbc.TableName;
 import org.deegree.commons.tom.TypedObjectNode;
 import org.deegree.commons.tom.genericxml.GenericXMLElement;
+import org.deegree.commons.tom.gml.GMLReferenceResolver;
 import org.deegree.commons.tom.gml.property.Property;
 import org.deegree.commons.tom.primitive.BaseType;
 import org.deegree.commons.tom.primitive.PrimitiveValue;
 import org.deegree.commons.tom.sql.ParticleConverter;
 import org.deegree.commons.utils.Pair;
+import org.deegree.cs.coordinatesystems.ICRS;
 import org.deegree.feature.Feature;
+import org.deegree.feature.FeatureCollection;
+import org.deegree.feature.persistence.BBoxTracker;
 import org.deegree.feature.persistence.FeatureStoreException;
 import org.deegree.feature.persistence.sql.FeatureTypeMapping;
 import org.deegree.feature.persistence.sql.MappedAppSchema;
 import org.deegree.feature.persistence.sql.SQLFeatureStore;
 import org.deegree.feature.persistence.sql.SQLFeatureStoreTransaction;
+import org.deegree.feature.persistence.sql.converter.CustomParticleConverter;
+import org.deegree.feature.persistence.sql.converter.FeatureParticleConverter;
 import org.deegree.feature.persistence.sql.expressions.TableJoin;
 import org.deegree.feature.persistence.sql.id.KeyPropagation;
 import org.deegree.feature.persistence.sql.id.TableDependencies;
+import org.deegree.feature.persistence.sql.jaxb.CustomConverterJAXB;
+//import org.deegree.feature.persistence.sql.insert.FeatureRow;
+//import org.deegree.feature.persistence.sql.insert.InsertRowManager;
+//import org.deegree.feature.persistence.sql.insert.InsertRow;
 import org.deegree.feature.persistence.sql.rules.CompoundMapping;
 import org.deegree.feature.persistence.sql.rules.ConstantMapping;
 import org.deegree.feature.persistence.sql.rules.FeatureMapping;
@@ -72,6 +85,7 @@ import org.deegree.feature.persistence.sql.rules.GeometryMapping;
 import org.deegree.feature.persistence.sql.rules.Mapping;
 import org.deegree.feature.persistence.sql.rules.PrimitiveMapping;
 import org.deegree.feature.types.FeatureType;
+import org.deegree.feature.types.property.GeometryPropertyType.CoordinateDimension;
 import org.deegree.feature.xpath.TypedObjectNodeXPathEvaluator;
 import org.deegree.filter.FilterEvaluationException;
 import org.deegree.geometry.Geometry;
@@ -104,7 +118,7 @@ public class InsertRowManager {
 
     private static Logger LOG = LoggerFactory.getLogger( InsertRowManager.class );
 
-    private final SQLFeatureStore fs;
+    private SQLFeatureStore fs;
 
     private final SQLDialect dialect;
 
@@ -113,6 +127,8 @@ public class InsertRowManager {
     private final IDGenMode idGenMode;
 
     private final TableDependencies tableDeps;
+    
+    private MappedAppSchema mappedschema;
 
     // key: original feature id (from Feature or FeatureReference), value: feature row
     private final Map<String, FeatureRow> origFidToFeatureRow = new HashMap<String, FeatureRow>();
@@ -125,8 +141,14 @@ public class InsertRowManager {
 
     // values: rows that have not been inserted yet, but can be inserted (no parents)
     private final Set<InsertRow> rootRows = new HashSet<InsertRow>();
+    
+    private final Map<Mapping, ParticleConverter<?>> particleMappingToConverter = new HashMap<Mapping, ParticleConverter<?>>();
 
-    /**
+	private GMLReferenceResolver resolver;
+	
+	private String tablename;
+	
+	 /**
      * Creates a new {@link InsertRowManager} instance.
      * 
      * @param fs
@@ -142,6 +164,27 @@ public class InsertRowManager {
         this.conn = conn;
         this.idGenMode = idGenMode;
         this.tableDeps = fs.getSchema().getKeyDependencies();
+    }
+
+    /**
+     * Creates a new {@link InsertRowManager} instance.
+     * 
+     * @param fs
+     *            feature store, must not be <code>null</code>
+     * @param conn
+     *            connection, must not be <code>null</code>
+     * @param idGenMode
+     *            feature id generation mode, must not be <code>null</code>
+     */
+    public InsertRowManager( SQLDialect dialect, Connection conn, IDGenMode idGenMode,MappedAppSchema schema, String tablename ) {
+        //this.fs = fs;
+        this.dialect = dialect;
+        this.conn = conn;
+        this.idGenMode = idGenMode;
+        this.mappedschema = schema;
+        this.tableDeps = schema.getKeyDependencies();
+        this.tablename = tablename;
+        initConverters();
     }
 
     /**
@@ -198,7 +241,7 @@ public class InsertRowManager {
 
         FeatureRow featureRow = null;
         try {
-            featureRow = new FeatureRow( this, feature.getId() ) {
+            featureRow = new FeatureRow( this, feature.getId(), tablename ) {
                 @Override
                 void performInsert( Connection conn, boolean propagateAutoGenColumns )
                                         throws SQLException, FeatureStoreException {
@@ -257,7 +300,7 @@ public class InsertRowManager {
     }
 
     MappedAppSchema getSchema() {
-        return fs.getSchema();
+        return mappedschema;
     }
 
     Set<SQLIdentifier> getGenColumns( TableName table ) {
@@ -272,7 +315,7 @@ public class InsertRowManager {
                             throws FeatureStoreException {
         FeatureRow featureRow = origFidToFeatureRow.get( fid );
         if ( featureRow == null ) {
-            featureRow = new FeatureRow( this, fid );
+            featureRow = new FeatureRow( this, fid, tablename );
             origFidToFeatureRow.put( fid, featureRow );
             delayedRows.add( featureRow );
         }
@@ -283,7 +326,7 @@ public class InsertRowManager {
                             throws FeatureStoreException {
         FeatureRow featureRow = origFidToFeatureRow.get( feature.getId() );
         if ( featureRow == null ) {
-            featureRow = new FeatureRow( this, feature.getId() );
+            featureRow = new FeatureRow( this, feature.getId(), tablename );
             delayedRows.add( featureRow );
             if ( feature.getId() != null ) {
                 origFidToFeatureRow.put( feature.getId(), featureRow );
@@ -324,7 +367,7 @@ public class InsertRowManager {
                     LOG.debug( "Skipping primitive mapping. Not mapped to database column." );
                 } else {
                     @SuppressWarnings("unchecked")
-                    ParticleConverter<PrimitiveValue> converter = (ParticleConverter<PrimitiveValue>) fs.getConverter( mapping );
+                    ParticleConverter<PrimitiveValue> converter = (ParticleConverter<PrimitiveValue>) getConverter( mapping );
                     PrimitiveValue primitiveValue = getPrimitiveValue( value );
                     if ( primitiveValue != null ) {
                         String column = ( (DBField) me ).getColumn();
@@ -338,7 +381,7 @@ public class InsertRowManager {
                 } else {
                     Geometry geom = (Geometry) getPropValue( value );
                     @SuppressWarnings("unchecked")
-                    ParticleConverter<Geometry> converter = (ParticleConverter<Geometry>) fs.getConverter( mapping );
+                    ParticleConverter<Geometry> converter = (ParticleConverter<Geometry>) getConverter( mapping );
                     String column = ( (DBField) me ).getColumn();
                     currentRow.addPreparedArgument( column, geom, converter );
                 }
@@ -464,7 +507,7 @@ public class InsertRowManager {
     private JoinRow buildJoinRow( InsertRow row, TableJoin join )
                             throws FeatureStoreException {
 
-        JoinRow newRow = new JoinRow( this, join );
+        JoinRow newRow = new JoinRow( this, join, tablename );
         delayedRows.add( newRow );
 
         KeyPropagation keyPropagation = tableDeps.findKeyPropagation( join.getFromTable(), join.getFromColumns(),
@@ -549,5 +592,148 @@ public class InsertRowManager {
     public int getDelayedRows() {
         return delayedRows.size();
     }
+    
+    
+    private void initConverters() {
+        for ( FeatureType ft : mappedschema.getFeatureTypes() ) {
+            FeatureTypeMapping ftMapping = mappedschema.getFtMapping( ft.getName() );
+            if ( ftMapping != null ) {
+                for ( Mapping particleMapping : ftMapping.getMappings() ) {
+                    initConverter( particleMapping );
+                }
+            }
+        }
+    }
 
+    @SuppressWarnings("unchecked")
+	private void initConverter( Mapping particleMapping ) {
+        if ( particleMapping instanceof PrimitiveMapping ) {
+        	System.out.println("Primitive mapping");
+            PrimitiveMapping pm = (PrimitiveMapping) particleMapping;
+            ParticleConverter<?> converter = null;
+            if ( pm.getConverter() == null ) {
+                converter = dialect.getPrimitiveConverter( pm.getMapping().toString(), pm.getType() );
+            } else {
+            	System.out.println("ELSE");
+                converter = instantiateConverter( pm.getConverter() );
+                ( (CustomParticleConverter<TypedObjectNode>) converter ).init( particleMapping, null );
+            }
+            particleMappingToConverter.put( particleMapping, converter );
+        } else if ( particleMapping instanceof GeometryMapping ) {
+        	System.out.println("Geometry mapping");
+            GeometryMapping gm = (GeometryMapping) particleMapping;
+            ParticleConverter<?> converter = getGeometryConverter( gm );
+            particleMappingToConverter.put( particleMapping, converter );
+        } else if ( particleMapping instanceof FeatureMapping ) {
+        	System.out.println("Feature mapping");
+            FeatureMapping fm = (FeatureMapping) particleMapping;
+            SQLIdentifier fkColumn = null;
+            if ( fm.getJoinedTable() != null && !fm.getJoinedTable().isEmpty() ) {
+                // TODO more complex joins
+                fkColumn = fm.getJoinedTable().get( fm.getJoinedTable().size() - 1 ).getFromColumns().get( 0 );
+            }
+            SQLIdentifier hrefColumn = null;
+            if ( fm.getHrefMapping() != null ) {
+                hrefColumn = new SQLIdentifier( fm.getHrefMapping().toString() );
+            }
+            FeatureType valueFt = null;
+            if ( fm.getValueFtName() != null ) {
+                valueFt = mappedschema.getFeatureType( fm.getValueFtName() );
+            }
+            ParticleConverter<?> converter = new FeatureParticleConverter( fkColumn, hrefColumn, getResolver(),
+                                                                           valueFt, mappedschema );
+            particleMappingToConverter.put( particleMapping, converter );
+        } else if ( particleMapping instanceof CompoundMapping ) {
+        	System.out.println("Compound mapping");
+            CompoundMapping cm = (CompoundMapping) particleMapping;
+            for ( Mapping childMapping : cm.getParticles() ) {
+                initConverter( childMapping );
+            }
+        } else {
+            LOG.warn( "Unhandled particle mapping type {}", particleMapping );
+        }
+    }
+
+    public ParticleConverter<?> getConverter( Mapping mapping ) {
+        return particleMappingToConverter.get( mapping );
+    }
+    
+    @SuppressWarnings("unchecked")
+    private CustomParticleConverter<TypedObjectNode> instantiateConverter( CustomConverterJAXB config ) {
+        String className = config.getClazz();
+        LOG.info( "Instantiating configured custom particle converter (class=" + className + ")" );
+        try {
+            //return (CustomParticleConverter<TypedObjectNode>) workspace.getModuleClassLoader().loadClass( className ).newInstance();
+        	return null;
+        } catch ( Throwable t ) {
+            String msg = "Unable to instantiate custom particle converter (class=" + className + "). "
+                         + " Maybe directory 'modules' in your workspace is missing the JAR with the "
+                         + " referenced converter class?! " + t.getMessage();
+            LOG.error( msg, t );
+            throw new IllegalArgumentException( msg );
+        }
+    }
+    
+    ParticleConverter<Geometry> getGeometryConverter( GeometryMapping geomMapping ) {
+        String column = geomMapping.getMapping().toString();
+        ICRS crs = geomMapping.getCRS();
+        String srid = geomMapping.getSrid();
+        boolean is2d = geomMapping.getDim() == CoordinateDimension.DIM_2;
+        return dialect.getGeometryConverter( column, crs, srid, is2d );
+    }
+    
+    public GMLReferenceResolver getResolver() {
+        return resolver;
+    }
+    /**
+     * Code from  SQLFeatureStoreTransaction.ImportData:
+     * @param fCollection FeatureCollection of the GML file to import
+     * @throws FeatureStoreException
+     * @throws SQLException
+     * @throws FilterEvaluationException
+     */
+    public void importData(FeatureCollection fCollection) throws FeatureStoreException, SQLException, FilterEvaluationException {
+    	
+    	List<FeatureRow> idAssignments = new ArrayList<FeatureRow>();
+		BBoxTracker bboxTracker = new BBoxTracker();
+
+		Set<Geometry> geometries = new LinkedHashSet<Geometry>();
+		Set<Feature> features = new LinkedHashSet<Feature>();
+		Set<String> fids = new LinkedHashSet<String>();
+		Set<String> gids = new LinkedHashSet<String>();
+
+		for (Feature member : fCollection) {
+			findFeaturesAndGeometries(member, geometries, features, fids, gids);
+		}
+
+		for (Feature feature : features) {
+			FeatureTypeMapping ftMapping = mappedschema.getFtMapping(feature
+					.getName());
+			if (ftMapping == null) {
+				throw new FeatureStoreException(
+						"Cannot insert feature of type '" + feature.getName()
+								+ "'. No mapping defined and BLOB mode is off.");
+			}
+			idAssignments.add(insertFeature(feature, ftMapping));
+			Pair<TableName, GeometryMapping> mapping = ftMapping
+					.getDefaultGeometryMapping();
+			if (mapping != null) {
+				ICRS storageSrs = mapping.second.getCRS();
+				bboxTracker.insert(feature, storageSrs);
+			}
+		}
+		if (getDelayedRows() != 0) {
+			String msg = "After insertion, "
+					+ getDelayedRows()
+					+ " delayed rows left uninserted. Probably a cyclic key constraint blocks insertion.";
+			throw new RuntimeException(msg);
+		}
+		// TODO why is this necessary?
+		fids.clear();
+		for (FeatureRow assignment : idAssignments) {
+			fids.add(assignment.getNewId());
+		}
+
+    	
+    }
 }
